@@ -498,14 +498,7 @@ add_forward() {
             protocol_choice="1"
         fi
         
-        # TCP Fast Open选项
-        tcp_fastopen="false"
-        if [[ $protocol_choice == "1" || $protocol_choice == "3" ]]; then
-            read -p "是否启用TCP Fast Open? (Y/N，默认N): " enable_tfo
-            if [[ $enable_tfo == "Y" || $enable_tfo == "y" ]]; then
-                tcp_fastopen="true"
-            fi
-        fi
+
         
         # 格式化监听地址（IPv6需要方括号）
         if [[ $listen_ip == *":"* ]]; then
@@ -524,9 +517,6 @@ add_forward() {
                 echo "[[endpoints]]" >> /root/realm/config.toml
                 echo "listen = \"$listen_addr\"" >> /root/realm/config.toml
                 echo "remote = \"$remote_ip:$remote_port\"" >> /root/realm/config.toml
-                if [ "$tcp_fastopen" = "true" ]; then
-                    echo "tcp_fast_open = true" >> /root/realm/config.toml
-                fi
                 echo "转发规则已添加：$listen_addr -> $remote_ip:$remote_port (TCP)"
                 ;;
             2)
@@ -545,9 +535,6 @@ add_forward() {
                 echo "[[endpoints]]" >> /root/realm/config.toml
                 echo "listen = \"$listen_addr\"" >> /root/realm/config.toml
                 echo "remote = \"$remote_ip:$remote_port\"" >> /root/realm/config.toml
-                if [ "$tcp_fastopen" = "true" ]; then
-                    echo "tcp_fast_open = true" >> /root/realm/config.toml
-                fi
                 # UDP规则
                 echo "" >> /root/realm/config.toml
                 echo "[[endpoints]]" >> /root/realm/config.toml
@@ -679,14 +666,7 @@ batch_add_ipv6() {
         protocol_choice="3"
     fi
     
-    # TCP Fast Open
-    tcp_fastopen="false"
-    if [[ $protocol_choice == "1" || $protocol_choice == "3" ]]; then
-        read -p "是否启用TCP Fast Open? (Y/N，默认Y): " enable_tfo
-        if [ -z "$enable_tfo" ] || [[ $enable_tfo == "Y" || $enable_tfo == "y" ]]; then
-            tcp_fastopen="true"
-        fi
-    fi
+
     
     # 添加规则
     echo ""
@@ -707,9 +687,6 @@ batch_add_ipv6() {
                 echo "[[endpoints]]" >> /root/realm/config.toml
                 echo "listen = \"[$ipv6_addr]:$listen_port\"" >> /root/realm/config.toml
                 echo "remote = \"$hk_ip:$remote_port\"" >> /root/realm/config.toml
-                if [ "$tcp_fastopen" = "true" ]; then
-                    echo "tcp_fast_open = true" >> /root/realm/config.toml
-                fi
                 echo "  ✓ [$ipv6_addr]:$listen_port -> $hk_ip:$remote_port (TCP)"
                 ;;
         esac
