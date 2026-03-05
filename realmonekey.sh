@@ -625,10 +625,82 @@ batch_add_ipv6() {
     echo "说明：此功能适用于A机器有多个IPv6地址，需要统一转发到香港机器的场景"
     echo ""
     
-    # 输入三个IPv6地址
-    read -p "请输入电信IPv6地址: " ipv6_telecom
-    read -p "请输入联通IPv6地址: " ipv6_unicom
-    read -p "请输入移动IPv6地址: " ipv6_mobile
+    # 自动检测本机IPv6地址
+    echo "正在检测本机IPv6地址..."
+    echo ""
+    
+    # 获取所有global scope的IPv6地址（排除fe80开头的link-local地址）
+    local ipv6_list=$(ip -6 addr show scope global | grep -oP 'inet6 \K[0-9a-f:]+' | grep -v '^fe80')
+    
+    # 按照运营商前缀分类
+    local auto_telecom=""
+    local auto_unicom=""
+    local auto_mobile=""
+    
+    for ipv6 in $ipv6_list; do
+        # 电信：240e
+        if [[ $ipv6 == 240e:* ]]; then
+            auto_telecom=$ipv6
+        # 联通：2408
+        elif [[ $ipv6 == 2408:* ]]; then
+            auto_unicom=$ipv6
+        # 移动：2409
+        elif [[ $ipv6 == 2409:* ]]; then
+            auto_mobile=$ipv6
+        fi
+    done
+    
+    # 显示检测结果
+    if [ -n "$auto_telecom" ] || [ -n "$auto_unicom" ] || [ -n "$auto_mobile" ]; then
+        echo "检测到以下IPv6地址："
+        echo "-------------------"
+        if [ -n "$auto_telecom" ]; then
+            echo "电信 (240e): $auto_telecom"
+        else
+            echo "电信 (240e): 未检测到"
+        fi
+        if [ -n "$auto_unicom" ]; then
+            echo "联通 (2408): $auto_unicom"
+        else
+            echo "联通 (2408): 未检测到"
+        fi
+        if [ -n "$auto_mobile" ]; then
+            echo "移动 (2409): $auto_mobile"
+        else
+            echo "移动 (2409): 未检测到"
+        fi
+        echo "-------------------"
+        echo ""
+        
+        read -p "是否使用自动检测的地址？(Y/N，默认Y): " use_auto
+        if [[ -z "$use_auto" ]] || [[ $use_auto == "Y" ]] || [[ $use_auto == "y" ]]; then
+            ipv6_telecom=$auto_telecom
+            ipv6_unicom=$auto_unicom
+            ipv6_mobile=$auto_mobile
+            echo "已使用自动检测的地址。"
+            echo ""
+        else
+            echo "将手动输入IPv6地址。"
+            echo ""
+            ipv6_telecom=""
+            ipv6_unicom=""
+            ipv6_mobile=""
+        fi
+    else
+        echo "未检测到三网IPv6地址，请手动输入。"
+        echo ""
+    fi
+    
+    # 如果未自动检测到或用户选择手动输入，则提示输入
+    if [ -z "$ipv6_telecom" ]; then
+        read -p "请输入电信IPv6地址: " ipv6_telecom
+    fi
+    if [ -z "$ipv6_unicom" ]; then
+        read -p "请输入联通IPv6地址: " ipv6_unicom
+    fi
+    if [ -z "$ipv6_mobile" ]; then
+        read -p "请输入移动IPv6地址: " ipv6_mobile
+    fi
     
     if [ -z "$ipv6_telecom" ] || [ -z "$ipv6_unicom" ] || [ -z "$ipv6_mobile" ]; then
         echo "错误：IPv6地址不能为空。"
@@ -643,7 +715,7 @@ batch_add_ipv6() {
     fi
     
     # 输入香港机器的SD-WAN地址
-    read -p "请输入香港机器SD-WAN地址（如192.168.90.179）: " hk_ip
+    read -p "请输入香港机器SD-WAN地址（如192.168.1.2）: " hk_ip
     if [ -z "$hk_ip" ]; then
         echo "错误：香港机器地址不能为空。"
         return
