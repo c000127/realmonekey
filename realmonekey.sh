@@ -20,9 +20,74 @@ check_realm_service_status() {
     fi
 }
 
+# 获取当前全局转发模式
+get_forward_mode() {
+    if [ ! -f "/root/realm/config.toml" ]; then
+        echo "TCP"
+        return
+    fi
+    local use_udp=$(grep -E '^use_udp\s*=\s*true' /root/realm/config.toml 2>/dev/null)
+    if [ -n "$use_udp" ]; then
+        echo "TCP+UDP"
+    else
+        echo "TCP"
+    fi
+}
+
+# 切换全局转发模式
+toggle_forward_mode() {
+    if [ ! -f "/root/realm/config.toml" ]; then
+        echo "配置文件不存在，正在创建..."
+        touch /root/realm/config.toml
+    fi
+
+    local current_mode=$(get_forward_mode)
+    if [ "$current_mode" = "TCP" ]; then
+        # 切换到 TCP+UDP：插入或更新 [network] 段
+        if grep -q '^\[network\]' /root/realm/config.toml; then
+            # [network] 段已存在，更新或添加 use_udp
+            if grep -qE '^use_udp\s*=' /root/realm/config.toml; then
+                sed -i 's/^use_udp\s*=.*/use_udp = true/' /root/realm/config.toml
+            else
+                sed -i '/^\[network\]/a use_udp = true' /root/realm/config.toml
+            fi
+        else
+            # 在文件开头插入 [network] 段
+            sed -i '1i\[network\]\nuse_udp = true\n' /root/realm/config.toml
+        fi
+        echo "已切换为：TCP+UDP 全局转发"
+    else
+        # 切换回 TCP：移除 use_udp 行
+        sed -i '/^use_udp\s*=.*/d' /root/realm/config.toml
+        # 如果 [network] 段已空，清理掉
+        # 检查 [network] 后是否还有其他配置
+        local net_line=$(grep -n '^\[network\]' /root/realm/config.toml | head -1 | cut -d: -f1)
+        if [ -n "$net_line" ]; then
+            local next_line=$((net_line + 1))
+            local next_content=$(sed -n "${next_line}p" /root/realm/config.toml)
+            # 如果下一行为空或是另一个段，删除 [network] 行
+            if [ -z "$next_content" ] || [[ "$next_content" == \[* ]]; then
+                sed -i "${net_line}d" /root/realm/config.toml
+                # 清理可能留下的空行
+                sed -i '/^$/N;/^\n$/d' /root/realm/config.toml
+            fi
+        fi
+        echo "已切换为：仅 TCP 转发"
+    fi
+    echo "提示：请重启realm服务使配置生效。"
+}
+
 # 显示菜单的函数
 show_menu() {
     clear
+    local fwd_mode=$(get_forward_mode)
+    local mode_color
+    if [ "$fwd_mode" = "TCP+UDP" ]; then
+        mode_color="\033[0;33m" # 黄色
+    else
+        mode_color="\033[0;36m" # 青色
+    fi
+
     echo "欢迎使用realm一键转发脚本"
     echo "================="
     echo "1. 部署环境"
@@ -34,10 +99,12 @@ show_menu() {
     echo "7. 停止服务"
     echo "8. 诊断realm问题"
     echo "9. 一键卸载"
+    echo "10. 切换转发模式（TCP/TCP+UDP）"
     echo "================="
     echo -e "realm 状态：${realm_status_color}${realm_status}\033[0m"
     echo -n "realm 转发状态："
     check_realm_service_status
+    echo -e "全局转发模式：${mode_color}${fwd_mode}\033[0m"
 }
 
 # 部署环境的函数
@@ -387,22 +454,11 @@ delete_forward() {
         local line_num=$(echo $endpoint_line | cut -d ':' -f 1)
         local end_line=$((line_num + 10))  # 读取后续几行
         
-        # 提取listen、remote、protocol等信息
-        local listen=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml | grep "listen =" | head -1 | cut -d '"' -f 2)
-        local remote=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml | grep "remote =" | head -1 | cut -d '"' -f 2)
-        local protocol=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml | grep "protocol =" | head -1 | cut -d '"' -f 2)
-        local tfo=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml | grep "tcp_fast_open" | head -1)
+        local block=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml)
+        local listen=$(echo "$block" | grep "listen =" | head -1 | cut -d '"' -f 2)
+        local remote=$(echo "$block" | grep "remote =" | head -1 | cut -d '"' -f 2)
         
-        if [ -z "$protocol" ]; then
-            protocol="tcp"
-        fi
-        
-        local tfo_status=""
-        if [ -n "$tfo" ]; then
-            tfo_status=" [TFO]"
-        fi
-        
-        echo "${index}. $listen -> $remote ($protocol)$tfo_status"
+        echo "${index}. $listen -> $remote"
         rule_info[$index]=$line_num
         let index+=1
     done
@@ -488,65 +544,26 @@ add_forward() {
             continue
         fi
         
-        # 协议选择
-        echo "请选择转发协议："
-        echo "1. TCP"
-        echo "2. UDP"
-        echo "3. TCP+UDP（创建两条规则）"
-        read -p "选择 (1/2/3，默认1): " protocol_choice
-        if [ -z "$protocol_choice" ]; then
-            protocol_choice="1"
-        fi
-        
-
-        
         # 格式化监听地址（IPv6需要方括号）
         if [[ $listen_ip == *":"* ]]; then
-            # IPv6地址
             listen_addr="[$listen_ip]:$listen_port"
         else
-            # IPv4地址
             listen_addr="$listen_ip:$listen_port"
         fi
         
-        # 根据协议选择添加规则
-        case $protocol_choice in
-            1)
-                # 仅TCP
-                echo "" >> /root/realm/config.toml
-                echo "[[endpoints]]" >> /root/realm/config.toml
-                echo "listen = \"$listen_addr\"" >> /root/realm/config.toml
-                echo "remote = \"$remote_ip:$remote_port\"" >> /root/realm/config.toml
-                echo "转发规则已添加：$listen_addr -> $remote_ip:$remote_port (TCP)"
-                ;;
-            2)
-                # 仅UDP
-                echo "" >> /root/realm/config.toml
-                echo "[[endpoints]]" >> /root/realm/config.toml
-                echo "listen = \"$listen_addr\"" >> /root/realm/config.toml
-                echo "remote = \"$remote_ip:$remote_port\"" >> /root/realm/config.toml
-                echo "protocol = \"udp\"" >> /root/realm/config.toml
-                echo "转发规则已添加：$listen_addr -> $remote_ip:$remote_port (UDP)"
-                ;;
-            3)
-                # TCP+UDP
-                # TCP规则
-                echo "" >> /root/realm/config.toml
-                echo "[[endpoints]]" >> /root/realm/config.toml
-                echo "listen = \"$listen_addr\"" >> /root/realm/config.toml
-                echo "remote = \"$remote_ip:$remote_port\"" >> /root/realm/config.toml
-                # UDP规则
-                echo "" >> /root/realm/config.toml
-                echo "[[endpoints]]" >> /root/realm/config.toml
-                echo "listen = \"$listen_addr\"" >> /root/realm/config.toml
-                echo "remote = \"$remote_ip:$remote_port\"" >> /root/realm/config.toml
-                echo "protocol = \"udp\"" >> /root/realm/config.toml
-                echo "转发规则已添加：$listen_addr -> $remote_ip:$remote_port (TCP+UDP)"
-                ;;
-            *)
-                echo "无效选项，跳过添加。"
-                ;;
-        esac
+        # 格式化远程地址（IPv6需要方括号）
+        if [[ $remote_ip == *":"* ]]; then
+            remote_addr="[$remote_ip]:$remote_port"
+        else
+            remote_addr="$remote_ip:$remote_port"
+        fi
+        
+        # 添加规则（协议由全局 [network] 控制）
+        echo "" >> /root/realm/config.toml
+        echo "[[endpoints]]" >> /root/realm/config.toml
+        echo "listen = \"$listen_addr\"" >> /root/realm/config.toml
+        echo "remote = \"$remote_addr\"" >> /root/realm/config.toml
+        echo "转发规则已添加：$listen_addr -> $remote_addr (协议由全局模式控制)"
 
         read -p "是否继续添加(Y/N)? " answer
         if [[ $answer != "Y" && $answer != "y" ]]; then
@@ -588,33 +605,31 @@ view_forwards() {
         return
     fi
     
+    local fwd_mode=$(get_forward_mode)
+    local mode_color
+    if [ "$fwd_mode" = "TCP+UDP" ]; then
+        mode_color="\033[0;33m"
+    else
+        mode_color="\033[0;36m"
+    fi
+    echo -e "全局转发模式：${mode_color}${fwd_mode}\033[0m"
+    echo ""
+    
     local index=1
     for endpoint_line in "${endpoint_lines[@]}"; do
         local line_num=$(echo $endpoint_line | cut -d ':' -f 1)
         local end_line=$((line_num + 10))
         
-        local listen=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml | grep "listen =" | head -1 | cut -d '"' -f 2)
-        local remote=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml | grep "remote =" | head -1 | cut -d '"' -f 2)
-        local protocol=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml | grep "protocol =" | head -1 | cut -d '"' -f 2)
-        local tfo=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml | grep "tcp_fast_open" | head -1)
+        local block=$(sed -n "${line_num},${end_line}p" /root/realm/config.toml)
+        local listen=$(echo "$block" | grep "listen =" | head -1 | cut -d '"' -f 2)
+        local remote=$(echo "$block" | grep "remote =" | head -1 | cut -d '"' -f 2)
         
-        if [ -z "$protocol" ]; then
-            protocol="tcp"
-        fi
-        
-        local tfo_status=""
-        if [ -n "$tfo" ]; then
-            tfo_status=" [TCP Fast Open: 已启用]"
-        fi
-        
-        echo ""
         echo "规则 ${index}:"
         echo "  监听: $listen"
         echo "  转发: $remote"
-        echo "  协议: $protocol$tfo_status"
+        echo ""
         let index+=1
     done
-    echo ""
 }
 
 # 批量添加三网IPv6转发
@@ -728,21 +743,16 @@ batch_add_ipv6() {
         return
     fi
     
-    # 协议选择
-    echo "请选择转发协议："
-    echo "1. TCP"
-    echo "2. UDP"
-    echo "3. TCP+UDP"
-    read -p "选择 (1/2/3，默认3): " protocol_choice
-    if [ -z "$protocol_choice" ]; then
-        protocol_choice="3"
-    fi
-    
-
-    
-    # 添加规则
+    # 添加规则（协议由全局 [network] 控制）
     echo ""
     echo "正在添加转发规则..."
+    
+    # 格式化远程地址（IPv6需要方括号）
+    if [[ $hk_ip == *":"* ]]; then
+        remote_addr="[$hk_ip]:$remote_port"
+    else
+        remote_addr="$hk_ip:$remote_port"
+    fi
     
     for isp in "电信:$ipv6_telecom" "联通:$ipv6_unicom" "移动:$ipv6_mobile"; do
         local isp_name=$(echo $isp | cut -d ':' -f 1)
@@ -751,28 +761,12 @@ batch_add_ipv6() {
         echo ""
         echo "添加 $isp_name 规则..."
         
-        case $protocol_choice in
-            1|3)
-                # TCP规则
-                echo "" >> /root/realm/config.toml
-                echo "# $isp_name IPv6 - TCP" >> /root/realm/config.toml
-                echo "[[endpoints]]" >> /root/realm/config.toml
-                echo "listen = \"[$ipv6_addr]:$listen_port\"" >> /root/realm/config.toml
-                echo "remote = \"$hk_ip:$remote_port\"" >> /root/realm/config.toml
-                echo "  ✓ [$ipv6_addr]:$listen_port -> $hk_ip:$remote_port (TCP)"
-                ;;
-        esac
-        
-        if [ "$protocol_choice" = "2" ] || [ "$protocol_choice" = "3" ]; then
-            # UDP规则
-            echo "" >> /root/realm/config.toml
-            echo "# $isp_name IPv6 - UDP" >> /root/realm/config.toml
-            echo "[[endpoints]]" >> /root/realm/config.toml
-            echo "listen = \"[$ipv6_addr]:$listen_port\"" >> /root/realm/config.toml
-            echo "remote = \"$hk_ip:$remote_port\"" >> /root/realm/config.toml
-            echo "protocol = \"udp\"" >> /root/realm/config.toml
-            echo "  ✓ [$ipv6_addr]:$listen_port -> $hk_ip:$remote_port (UDP)"
-        fi
+        echo "" >> /root/realm/config.toml
+        echo "# $isp_name IPv6" >> /root/realm/config.toml
+        echo "[[endpoints]]" >> /root/realm/config.toml
+        echo "listen = \"[$ipv6_addr]:$listen_port\"" >> /root/realm/config.toml
+        echo "remote = \"$remote_addr\"" >> /root/realm/config.toml
+        echo "  ✓ [$ipv6_addr]:$listen_port -> $remote_addr"
     done
     
     echo ""
@@ -913,6 +907,9 @@ while true; do
             ;;
         9)
             uninstall_realm
+            ;;
+        10)
+            toggle_forward_mode
             ;;
         *)
             echo "无效选项: $choice"
